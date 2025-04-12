@@ -1,0 +1,72 @@
+-- This query identifies scientific articles published between 2012 and 2022 
+-- that are not part of the original sample of university-industry collaborations, 
+-- but share high-level research topics (concepts with score > 0.7) with those publications.
+
+-- The query proceeds in the following steps:
+-- 1. Selects all distinct concepts (level 3) with score > 0.7 from the original sample 
+--    stored in `sample_creation_v4`.
+-- 2. Finds all other publications in OpenAlex that are associated with those selected concepts,
+--    but are not included in the original sample.
+-- 3. Filters these publications to include only articles with:
+--    - Brazilian-only institutional affiliations (i.e., all authors from institutions in Brazil),
+--    - No simultaneous collaboration between companies and educational institutions,
+--    - Document type = 'article',
+--    - Publication year between 2012 and 2022.
+
+WITH selected_concepts AS (
+  SELECT DISTINCT wc.concept_id
+  FROM insyspo.publicdb_openalex_2025_03_rm.works_concepts AS wc
+  JOIN keen-tide-456413-b6.uic_brazil.sample_creation_v4 AS base
+    ON wc.work_id = base.work_id
+  JOIN insyspo.publicdb_openalex_2025_03_rm.concepts AS c
+    ON wc.concept_id = c.id
+  WHERE wc.score > 0.7
+    AND c.level = 3
+),
+
+candidate_works AS (
+  SELECT DISTINCT wc.work_id
+  FROM insyspo.publicdb_openalex_2025_03_rm.works_concepts AS wc
+  JOIN selected_concepts AS sc
+    ON wc.concept_id = sc.concept_id
+  WHERE wc.score > 0.7
+    AND wc.work_id NOT IN (
+      SELECT work_id
+      FROM keen-tide-456413-b6.uic_brazil.sample_creation_v4
+    )
+),
+
+filtered_works AS (
+  SELECT
+    w.id AS work_id,
+    w.publication_year,
+    w.doi
+  FROM candidate_works AS cw
+  JOIN insyspo.publicdb_openalex_2025_03_rm.works AS w
+    ON cw.work_id = w.id
+  JOIN insyspo.publicdb_openalex_2025_03_rm.works_authorships AS wa
+    ON w.id = wa.work_id
+  JOIN insyspo.publicdb_openalex_2025_03_rm.institutions AS i
+    ON wa.institution_id = i.id
+  WHERE w.publication_year BETWEEN 2012 AND 2022
+    AND w.type = 'article'
+  GROUP BY w.id, w.publication_year, w.doi
+  HAVING
+    COUNT(DISTINCT i.country) = 1
+    AND MAX(i.country) = 'Brazil'
+    AND NOT (
+      COUNT(DISTINCT CASE WHEN i.type = 'company' THEN i.id END) >= 1
+      AND COUNT(DISTINCT CASE WHEN i.type = 'education' THEN i.id END) >= 1
+    )
+)
+
+SELECT
+  fw.work_id,
+  fw.publication_year,
+  fw.doi
+FROM filtered_works AS fw
+ORDER BY fw.publication_year, fw.work_id;
+
+-- Results: 65234 (numeber of articles)
+  -- 1050 unique institutions
+  
