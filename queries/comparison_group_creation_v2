@@ -1,0 +1,90 @@
+-- This query builds a comparison group (v2) of Brazilian scientific articles that:
+-- (1) Share research topics (OpenAlex concepts, level 3, score > 0.7) with UIC publications;
+-- (2) Were published in the SAME YEAR as the UIC articles they match;
+-- (3) Have an average score > 0.75 for those shared concepts, ensuring stronger thematic alignment;
+-- (4) Were NOT part of the original UIC sample;
+-- (5) Involve ONLY Brazilian institutions, and do NOT involve university–industry collaboration.
+--
+-- These constraints improve the comparability between the UIC sample and the control group
+-- for analyses of scientific impact, citations, open access, etc.
+-- --------------------------------------------------------------------------------------------
+
+WITH selected_concepts AS (
+  -- Step 1: Select relevant concepts (level 3, score > 0.7) from the UIC sample,
+  -- along with the publication year of the originating article.
+  -- This enables exact YEAR matching with candidate publications later on.
+  SELECT DISTINCT
+    wc.concept_id,
+    w.publication_year
+  FROM insyspo.publicdb_openalex_2025_03_rm.works_concepts AS wc
+  JOIN keen-tide-456413-b6.uic_brazil.sample_creation_v4 AS base
+    ON wc.work_id = base.work_id
+  JOIN insyspo.publicdb_openalex_2025_03_rm.concepts AS c
+    ON wc.concept_id = c.id
+  JOIN insyspo.publicdb_openalex_2025_03_rm.works AS w
+    ON wc.work_id = w.id
+  WHERE wc.score > 0.7
+    AND c.level = 3
+),
+
+candidate_works AS (
+  -- Step 2: Identify publications that:
+  -- - Share at least one concept with the UIC sample (score > 0.7);
+  -- - Were published in the same YEAR as the UIC article that shares the concept;
+  -- - Are not already part of the UIC sample;
+  -- - Have a strong overall thematic match (AVG score of shared concepts > 0.75).
+  SELECT
+    wc.work_id,
+    w.publication_year,
+    COUNT(DISTINCT wc.concept_id) AS num_concepts_shared,
+    AVG(wc.score) AS avg_shared_score
+  FROM insyspo.publicdb_openalex_2025_03_rm.works_concepts AS wc
+  JOIN insyspo.publicdb_openalex_2025_03_rm.works AS w
+    ON wc.work_id = w.id
+  JOIN selected_concepts AS sc
+    ON wc.concept_id = sc.concept_id
+   AND w.publication_year = sc.publication_year  -- NEW: enforce same publication year as in the UIC sample
+  WHERE wc.score > 0.7
+    AND wc.work_id NOT IN (
+      SELECT work_id FROM keen-tide-456413-b6.uic_brazil.sample_creation_v4
+    )
+  GROUP BY wc.work_id, w.publication_year
+  HAVING AVG(wc.score) > 0.75  -- NEW: filter for stronger thematic similarity
+),
+
+filtered_works AS (
+  -- Step 3: Apply institutional filters:
+  -- - Include only articles published between 2012 and 2022;
+  -- - Must be classified as 'article';
+  -- - Must have affiliations ONLY from Brazilian institutions;
+  -- - Must NOT involve both a company and an educational institution (i.e., exclude UIC cases).
+  SELECT
+    w.id AS work_id,
+    w.publication_year,
+    w.doi
+  FROM candidate_works AS cw
+  JOIN insyspo.publicdb_openalex_2025_03_rm.works AS w
+    ON cw.work_id = w.id
+  JOIN insyspo.publicdb_openalex_2025_03_rm.works_authorships AS wa
+    ON w.id = wa.work_id
+  JOIN insyspo.publicdb_openalex_2025_03_rm.institutions AS i
+    ON wa.institution_id = i.id
+  WHERE w.publication_year BETWEEN 2012 AND 2022
+    AND w.type = 'article'
+  GROUP BY w.id, w.publication_year, w.doi
+  HAVING
+    COUNT(DISTINCT i.country) = 1
+    AND MAX(i.country) = 'Brazil'
+    AND NOT (
+      COUNT(DISTINCT CASE WHEN i.type = 'company' THEN i.id END) >= 1
+      AND COUNT(DISTINCT CASE WHEN i.type = 'education' THEN i.id END) >= 1
+    )
+)
+
+-- Final output: return the filtered comparison group articles
+SELECT
+  fw.work_id,
+  fw.publication_year,
+  fw.doi
+FROM filtered_works AS fw
+ORDER BY fw.publication_year, fw.work_id;
